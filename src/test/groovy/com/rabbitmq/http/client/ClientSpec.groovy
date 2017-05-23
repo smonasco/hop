@@ -16,7 +16,9 @@
 
 package com.rabbitmq.http.client
 
+import com.rabbitmq.client.AuthenticationFailureException
 import com.rabbitmq.http.client.domain.Definitions
+import org.apache.http.impl.client.HttpClientBuilder
 import spock.lang.IgnoreIf
 import spock.lang.Specification
 
@@ -37,6 +39,7 @@ import com.rabbitmq.http.client.domain.ClusterId
 import com.rabbitmq.http.client.domain.ConnectionInfo
 import com.rabbitmq.http.client.domain.ExchangeInfo
 import com.rabbitmq.http.client.domain.NodeInfo
+import com.rabbitmq.http.client.domain.PolicyInfo
 import com.rabbitmq.http.client.domain.QueueInfo
 import com.rabbitmq.http.client.domain.UserPermissions
 import com.rabbitmq.http.client.domain.VhostInfo
@@ -50,14 +53,22 @@ class ClientSpec extends Specification {
   protected Client client
   private final ConnectionFactory cf = initializeConnectionFactory()
 
-  protected ConnectionFactory initializeConnectionFactory() {
+  protected static ConnectionFactory initializeConnectionFactory() {
     final cf = new ConnectionFactory()
     cf.setAutomaticRecoveryEnabled(false)
     cf
   }
 
   def setup() {
-    client = new Client("http://127.0.0.1:15672/api/", DEFAULT_USERNAME, DEFAULT_PASSWORD)
+    client = newLocalhostNodeClient()
+  }
+
+  protected static Client newLocalhostNodeClient() {
+    new Client("http://127.0.0.1:15672/api/", DEFAULT_USERNAME, DEFAULT_PASSWORD)
+  }
+
+  protected static Client newLocalhostNodeClient(HttpClientBuilderConfigurator cfg) {
+    new Client("http://127.0.0.1:15672/api/", DEFAULT_USERNAME, DEFAULT_PASSWORD, cfg)
   }
 
   def "GET /api/overview"() {
@@ -84,7 +95,7 @@ class ClientSpec extends Specification {
     qTotals.messagesReady >= 0
     qTotals.messagesUnacknowledged >= 0
 
-    final oTotals = res.getObjectTotals();
+    final oTotals = res.getObjectTotals()
     oTotals.connections >= 0
     oTotals.channels >= 0
     oTotals.exchanges >= 0
@@ -107,6 +118,29 @@ class ClientSpec extends Specification {
 
   def "GET /api/nodes"() {
     when: "client retrieves a list of cluster nodes"
+    final res = client.getNodes()
+    final node = res.first()
+
+    then: "the list is returned"
+    res.size() >= 1
+    verifyNode(node)
+  }
+
+  def "GET /api/nodes with a user-provided HTTP builder configurator"() {
+    when: "a user-provided HTTP builder configurator is set"
+    final cfg = new HttpClientBuilderConfigurator() {
+      @Override
+      HttpClientBuilder configure(HttpClientBuilder builder) {
+        // this number has no particular meaning
+        // but it should be enough connections for this test suite
+        // and then some. MK.
+        builder.setMaxConnTotal(8192)
+        return builder
+      }
+    }
+    final client = newLocalhostNodeClient(cfg)
+
+    and: "client retrieves a list of cluster nodes"
     final res = client.getNodes()
     final node = res.first()
 
@@ -206,6 +240,35 @@ class ClientSpec extends Specification {
     }
   }
 
+  def "DELETE /api/connections/{name} with a user-provided reason"() {
+    given: "an open RabbitMQ client connection"
+    final latch = new CountDownLatch(1)
+    final conn = openConnection()
+    conn.addShutdownListener(new ShutdownListener() {
+      @Override
+      void shutdownCompleted(ShutdownSignalException e) {
+        latch.countDown()
+      }
+    })
+    assert conn.isOpen()
+
+    when: "client closes the connection"
+    awaitEventPropagation()
+    final xs = client.getConnections()
+    xs.each({ client.closeConnection(it.name, "because reasons!") })
+
+    and: "some time passes"
+    assert awaitOn(latch)
+
+    then: "the connection is closed"
+    !conn.isOpen()
+
+    cleanup:
+    if (conn.isOpen()) {
+      conn.close()
+    }
+  }
+
   def "GET /api/channels"() {
     given: "an open RabbitMQ client connection with 1 channel"
     final conn = openConnection()
@@ -278,7 +341,7 @@ class ClientSpec extends Specification {
     final xs = client.getExchanges("/")
 
     then: "the list is returned"
-    final x = xs.find { it.name.equals("amq.fanout") }
+    final x = xs.find { (it.name == "amq.fanout") }
     verifyExchangeInfo(x)
   }
 
@@ -299,7 +362,7 @@ class ClientSpec extends Specification {
     final xs = client.getExchange("/", "amq.fanout")
 
     then: "exchange info is returned"
-    final ExchangeInfo x = (ExchangeInfo)xs.find { it.name.equals("amq.fanout") && it.vhost.equals("/") }
+    final ExchangeInfo x = (ExchangeInfo)xs.find { it.name == "amq.fanout" && it.vhost == "/" }
     verifyExchangeInfo(x)
   }
 
@@ -313,7 +376,7 @@ class ClientSpec extends Specification {
     List<ExchangeInfo> xs = client.getExchanges(v)
 
     then: "hop.test is listed"
-    ExchangeInfo x = xs.find { it.name.equals(s) }
+    ExchangeInfo x = xs.find { (it.name == s) }
     x != null
     verifyExchangeInfo(x)
 
@@ -328,7 +391,7 @@ class ClientSpec extends Specification {
     client.declareExchange(v, s, new ExchangeInfo("fanout", false, false))
 
     List<ExchangeInfo> xs = client.getExchanges(v)
-    ExchangeInfo x = xs.find { it.name.equals(s) }
+    ExchangeInfo x = xs.find { (it.name == s) }
     x != null
     verifyExchangeInfo(x)
 
@@ -339,7 +402,7 @@ class ClientSpec extends Specification {
     xs = client.getExchanges(v)
 
     then: "hop.test no longer exists"
-    xs.find { it.name.equals(s) } == null
+    xs.find { (it.name == s) } == null
   }
 
   def "POST /api/exchanges/{vhost}/{name}/publish"() {
@@ -351,13 +414,13 @@ class ClientSpec extends Specification {
     final conn = openConnection()
     final ch = conn.createChannel()
     final q = "hop.queue1"
-    ch.queueDeclare(q, false, false, false, null);
+    ch.queueDeclare(q, false, false, false, null)
 
     when: "client lists bindings of default exchange"
-    final xs = client.getBindingsBySource("/", "");
+    final xs = client.getBindingsBySource("/", "")
 
     then: "there is an automatic binding for hop.queue1"
-    final x = xs.find { it.source.equals("") && it.destinationType.equals("queue") && it.destination.equals(q) }
+    final x = xs.find { it.source == "" && it.destinationType == "queue" && it.destination == q }
     x != null
 
     cleanup:
@@ -371,20 +434,21 @@ class ClientSpec extends Specification {
     final ch = conn.createChannel()
     final src = "amq.fanout"
     final dest = "hop.exchange1"
-    ch.exchangeDeclare(dest, "fanout");
-    ch.exchangeBind(dest, src, "");
+    ch.exchangeDeclare(dest, "fanout")
+    ch.exchangeBind(dest, src, "")
 
     when: "client lists bindings of amq.fanout"
-    final xs = client.getExchangeBindingsByDestination("/", dest);
+    final xs = client.getExchangeBindingsByDestination("/", dest)
 
     then: "there is a binding for hop.exchange1"
-    final x = xs.find { it.source.equals(src) &&
-        it.destinationType.equals("exchange") &&
-        it.destination.equals(dest) }
+    final x = xs.find { it.source == src &&
+        it.destinationType == "exchange" &&
+        it.destination == dest
+    }
     x != null
 
     cleanup:
-    ch.exchangeDelete(dest);
+    ch.exchangeDelete(dest)
     conn.close()
   }
 
@@ -500,7 +564,7 @@ class ClientSpec extends Specification {
     final s = "hop.test"
     client.declareQueue(v, s, new QueueInfo(false, false, false))
 
-    and: "client lists exchanges in vhost /"
+    and: "client lists queues in vhost /"
     List<QueueInfo> xs = client.getQueues(v)
 
     then: "hop.test is listed"
@@ -514,6 +578,32 @@ class ClientSpec extends Specification {
 
     cleanup:
     client.deleteQueue(v, s)
+  }
+
+  def "PUT /api/policies/{vhost}/{name}"() {
+    given: "vhost / and definition"
+    final v = "/"
+    final d = new HashMap<String, Object>()
+    d.put("ha-mode", "all")
+
+    when: "client declares a policy hop.test"
+    final s = "hop.test"
+    client.declarePolicy(v, s, new PolicyInfo(".*", 1, null, d))
+
+    and: "client lists policies in vhost /"
+    List<PolicyInfo> ps = client.getPolicies(v)
+
+    then: "hop.test is listed"
+    PolicyInfo p = ps.find { it.name.equals(s) }
+    p != null
+    p.vhost.equals(v)
+    p.name.equals(s)
+    p.priority.equals(1)
+    p.applyTo.equals("all")
+    p.definition.equals(d)
+
+    cleanup:
+    client.deletePolicy(v, s)
   }
 
   def "PUT /api/queues/{vhost}/{name} when vhost DOES NOT exist"() {
@@ -874,19 +964,19 @@ class ClientSpec extends Specification {
     final x = xs.find { it.name.equals("guest") }
     x.name == "guest"
     x.passwordHash != null
-    isVersion36orMore(version) ? x.hashingAlgorithm != null : x.hashingAlgorithm == null
+    isVersion36orLater(version) ? x.hashingAlgorithm != null : x.hashingAlgorithm == null
     x.tags.contains("administrator")
   }
 
   def "GET /api/users/{name} when user exists"() {
     when: "user guest if fetched"
     final x = client.getUser("guest")
-    final version = client.getOverview().getRabbitMQVersion();
+    final version = client.getOverview().getRabbitMQVersion()
 
     then: "user info returned"
     x.name == "guest"
     x.passwordHash != null
-    isVersion36orMore(version) ? x.hashingAlgorithm != null : x.hashingAlgorithm == null
+    isVersion36orLater(version) ? x.hashingAlgorithm != null : x.hashingAlgorithm == null
     x.tags.contains("administrator")
   }
 
@@ -954,6 +1044,26 @@ class ClientSpec extends Specification {
     xs == null
   }
 
+  def "PUT /api/users/{name} with a blank password hash"() {
+    given: "user alt-user with a blank password hash"
+    final u = "alt-user"
+    // blank password hash means only authentication using alternative
+    // authentication mechanisms such as x509 certificates is possible. MK.
+    final h = ""
+    client.deleteUser(u)
+    client.createUserWithPasswordHash(u, h.toCharArray(), Arrays.asList("original", "management"))
+    client.updatePermissions("/", u, new UserPermissions(".*", ".*", ".*"))
+
+    when: "alt-user tries to connect with a blank password"
+    final conn = openConnection("alt-user", "alt-user")
+
+    then: "connection is refused"
+    // it would have a chance of being accepted if the x509 authentication mechanism was used. MK.
+    thrown AuthenticationFailureException
+
+    cleanup:
+    client.deleteUser(u)
+  }
 
   def "GET /api/whoami"() {
     when: "client retrieves active name authentication details"
@@ -1077,11 +1187,58 @@ class ClientSpec extends Specification {
   }
 
   def "GET /api/policies"() {
-    // TODO
+    given: "at least one policy was declared"
+    final v = "/"
+    final s = "hop.test"
+    final d = new HashMap<String, Object>()
+    final p = ".*"
+    d.put("ha-mode", "all")
+    client.declarePolicy(v, s, new PolicyInfo(p, 0, null, d))
+    awaitEventPropagation()
+
+    when: "client lists policies"
+    final xs = client.getPolicies()
+
+    then: "a list of policies is returned"
+    final x = xs.first()
+    verifyPolicyInfo(x)
+
+    cleanup:
+    client.deletePolicy(v, s)
   }
 
-  def "GET /api/policies/{vhost}"() {
-    // TODO
+  def "GET /api/policies/{vhost} when vhost exists"() {
+    given: "at least one policy was declared in vhost /"
+    final v = "/"
+    final s = "hop.test"
+    final d = new HashMap<String, Object>()
+    final p = ".*"
+    d.put("ha-mode", "all")
+    client.declarePolicy(v, s, new PolicyInfo(p, 0, null, d))
+    awaitEventPropagation()
+
+    when: "client lists policies"
+    final xs = client.getPolicies("/")
+
+    then: "a list of queues is returned"
+    final x = xs.first()
+    verifyPolicyInfo(x)
+
+    cleanup:
+    client.deletePolicy(v, s)
+  }
+
+  def "GET /api/policies/{vhost} when vhost DOES NOT exists"() {
+    given: "vhost lolwut DOES not exist"
+    final v = "lolwut"
+    client.deleteVhost(v)
+    awaitEventPropagation()
+
+    when: "client lists policies"
+    final xs = client.getPolicies(v)
+
+    then: "null is returned"
+    xs == null
   }
 
   def "GET /api/aliveness-test/{vhost}"() {
@@ -1102,7 +1259,7 @@ class ClientSpec extends Specification {
 
   def "PUT /api/cluster-name"() {
     given: "cluster name"
-    final String s = client.getClusterName().name;
+    final String s = client.getClusterName().name
 
     when: "cluster name is set to rabbit@warren"
     client.setClusterName("rabbit@warren")
@@ -1219,17 +1376,17 @@ class ClientSpec extends Specification {
     client.deleteQueue("/","queue1")
   }
 
-  protected boolean awaitOn(CountDownLatch latch) {
+  protected static boolean awaitOn(CountDownLatch latch) {
     latch.await(5, TimeUnit.SECONDS)
   }
 
-  protected void verifyConnectionInfo(ConnectionInfo info) {
+  protected static void verifyConnectionInfo(ConnectionInfo info) {
     info.port == ConnectionFactory.DEFAULT_AMQP_PORT
     !info.usesTLS
     info.peerHost.equals(info.host)
   }
 
-  protected void verifyChannelInfo(ChannelInfo chi, Channel ch) {
+  protected static void verifyChannelInfo(ChannelInfo chi, Channel ch) {
     chi.getConsumerCount() == 0
     chi.number == ch.getChannelNumber()
     chi.node.startsWith("rabbit@")
@@ -1238,7 +1395,7 @@ class ClientSpec extends Specification {
     !chi.transactional
   }
 
-  protected void verifyVhost(VhostInfo vhi) {
+  protected static void verifyVhost(VhostInfo vhi) {
     vhi.name == "/"
     !vhi.tracing
   }
@@ -1247,11 +1404,18 @@ class ClientSpec extends Specification {
     this.cf.newConnection()
   }
 
+  protected Connection openConnection(String username, String password) {
+    final cf = new ConnectionFactory()
+    cf.setUsername(username)
+    cf.setPassword(password)
+    cf.newConnection()
+  }
+
   protected Connection openConnection(String clientProvidedName) {
     this.cf.newConnection(clientProvidedName)
   }
 
-  protected void verifyNode(NodeInfo node) {
+  protected static void verifyNode(NodeInfo node) {
     assert node != null
     assert node.name != null
     assert node.socketsUsed <= node.socketsTotal
@@ -1260,51 +1424,60 @@ class ClientSpec extends Specification {
     assert node.memoryUsed <= node.memoryLimit
   }
 
-  protected void verifyExchangeInfo(ExchangeInfo x) {
+  protected static void verifyExchangeInfo(ExchangeInfo x) {
     assert x.type != null
     assert x.durable != null
     assert x.name != null
     assert x.autoDelete != null
   }
 
-  protected void verifyQueueInfo(QueueInfo x) {
+  protected static void verifyPolicyInfo(PolicyInfo x) {
+    assert x.name != null
+    assert x.vhost != null
+    assert x.pattern != null
+    assert x.definition != null
+    assert x.applyTo != null
+  }
+
+  protected static void verifyQueueInfo(QueueInfo x) {
     assert x.name != null
     assert x.durable != null
     assert x.exclusive != null
     assert x.autoDelete != null
   }
 
-  boolean isVersion36orMore(String currentVersion) {
-    currentVersion == "0.0.0" ? true : versionCompare(currentVersion,"3.6.0") >= 0
+  boolean isVersion36orLater(String currentVersion) {
+    String v = currentVersion.replaceAll("\\+.*\$", "");
+    v == "0.0.0" ? true : compareVersions(v, "3.6.0") >= 0
   }
 
   /**
    * http://stackoverflow.com/questions/6701948/efficient-way-to-compare-version-strings-in-java
    *
    */
-  Integer versionCompare(String str1, String str2) {
-    String[] vals1 = str1.split("\\.");
-    String[] vals2 = str2.split("\\.");
-    int i = 0;
+  Integer compareVersions(String str1, String str2) {
+    String[] vals1 = str1.split("\\.")
+    String[] vals2 = str2.split("\\.")
+    int i = 0
     // set index to first non-equal ordinal or length of shortest version string
-    while (i < vals1.length && i < vals2.length && vals1[i].equals(vals2[i])) {
-      i++;
+    while (i < vals1.length && i < vals2.length && vals1[i] == vals2[i]) {
+      i++
     }
     // compare first non-equal ordinal number
     if (i < vals1.length && i < vals2.length) {
       if(vals1[i].indexOf('-') != -1) {
-        vals1[i] = vals1[i].substring(0,vals1[i].indexOf('-'));
+        vals1[i] = vals1[i].substring(0,vals1[i].indexOf('-'))
       }
       if(vals2[i].indexOf('-') != -1) {
-        vals2[i] = vals2[i].substring(0,vals2[i].indexOf('-'));
+        vals2[i] = vals2[i].substring(0,vals2[i].indexOf('-'))
       }
-      int diff = Integer.valueOf(vals1[i]).compareTo(Integer.valueOf(vals2[i]));
-      return Integer.signum(diff);
+      int diff = Integer.valueOf(vals1[i]) <=> Integer.valueOf(vals2[i])
+      return Integer.signum(diff)
     }
     // the strings are equal or one string is a substring of the other
     // e.g. "1.2.3" = "1.2.3" or "1.2.3" < "1.2.3.4"
     else {
-      return Integer.signum(vals1.length - vals2.length);
+      return Integer.signum(vals1.length - vals2.length)
     }
   }
 
@@ -1313,7 +1486,7 @@ class ClientSpec extends Specification {
    * in particular starting with rabbitmq/rabbitmq-management#236,
    * so in some cases we need to wait before GET'ing e.g. a newly opened connection.
    */
-  protected void awaitEventPropagation() {
+  protected static void awaitEventPropagation() {
     // same number as used in rabbit-hole test suite. Works OK.
     Thread.sleep(1000)
   }

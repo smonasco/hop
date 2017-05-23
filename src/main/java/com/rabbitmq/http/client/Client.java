@@ -21,11 +21,7 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import com.rabbitmq.http.client.domain.*;
 import org.apache.http.HttpHeaders;
@@ -44,12 +40,15 @@ import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.message.BasicHeader;
 import org.apache.http.protocol.HttpContext;
 
+import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
@@ -59,9 +58,19 @@ import org.springframework.web.util.UriUtils;
 
 import javax.net.ssl.SSLContext;
 
+import org.springframework.util.Assert;
+
 public class Client {
-  private final RestTemplate rt;
-  private final URI rootUri;
+  private static final HttpClientBuilderConfigurator NO_OP_HTTP_CLIENT_BUILDER_CONFIGURATOR =
+      new HttpClientBuilderConfigurator() {
+      @Override
+      public HttpClientBuilder configure(HttpClientBuilder builder) {
+        return builder;
+      }
+    };
+
+  private RestTemplate rt;
+  private URI rootUri;
 
   //
   // API
@@ -70,7 +79,7 @@ public class Client {
   /**
    * Construct an instance with the provided url and credentials.
    * @param url the url e.g. "http://localhost:15672/api/".
-   * @param username the user name.
+   * @param username the username.
    * @param password the password
    * @throws MalformedURLException for a badly formed URL.
    * @throws URISyntaxException for a badly formed URL.
@@ -82,7 +91,21 @@ public class Client {
   /**
    * Construct an instance with the provided url and credentials.
    * @param url the url e.g. "http://localhost:15672/api/".
-   * @param username the user name.
+   * @param username the username.
+   * @param password the password
+   * @param configurator {@link HttpClientBuilderConfigurator} to use
+   * @throws MalformedURLException for a badly formed URL.
+   * @throws URISyntaxException for a badly formed URL.
+   */
+  public Client(String url, String username, String password, HttpClientBuilderConfigurator configurator)
+      throws MalformedURLException, URISyntaxException {
+    this(new URL(url), username, password, configurator);
+  }
+
+  /**
+   * Construct an instance with the provided url and credentials.
+   * @param url the url e.g. "http://localhost:15672/api/".
+   * @param username the username.
    * @param password the password
    * @throws MalformedURLException for a badly formed URL.
    * @throws URISyntaxException for a badly formed URL.
@@ -94,24 +117,42 @@ public class Client {
   /**
    * Construct an instance with the provided url and credentials.
    * @param url the url e.g. "http://localhost:15672/api/".
-   * @param username the user name.
+   * @param username the username.
+   * @param password the password
+   * @param configurator {@link HttpClientBuilderConfigurator} to use
+   * @throws MalformedURLException for a badly formed URL.
+   * @throws URISyntaxException for a badly formed URL.
+   */
+  public Client(URL url, String username, String password, HttpClientBuilderConfigurator configurator)
+      throws MalformedURLException, URISyntaxException {
+    this(url, username, password, null, null, configurator);
+  }
+
+  /**
+   * Construct an instance with the provided url and credentials.
+   * @param url the url e.g. "http://localhost:15672/api/".
+   * @param username the username.
    * @param password the password
    * @param sslConnectionSocketFactory ssl connection factory for http client
    * @param sslContext ssl context for http client
    * @throws MalformedURLException for a badly formed URL.
    * @throws URISyntaxException for a badly formed URL.
    */
-  private Client(URL url, String username, String password, SSLConnectionSocketFactory sslConnectionSocketFactory, SSLContext sslContext) throws MalformedURLException, URISyntaxException {
+  private Client(URL url, String username, String password, SSLConnectionSocketFactory sslConnectionSocketFactory, SSLContext sslContext)
+      throws MalformedURLException, URISyntaxException {
+    Assert.notNull(url);
+    Assert.notNull(username);
+    Assert.notNull(password);
     this.rootUri = url.toURI();
 
-    this.rt = new RestTemplate(getRequestFactory(url, username, password, sslConnectionSocketFactory, sslContext));
+    this.rt = new RestTemplate(getRequestFactory(url, username, password, sslConnectionSocketFactory, sslContext, NO_OP_HTTP_CLIENT_BUILDER_CONFIGURATOR));
     this.rt.setMessageConverters(getMessageConverters());
   }
 
   /**
    * Construct an instance with the provided url and credentials.
    * @param url the url e.g. "http://localhost:15672/api/".
-   * @param username the user name.
+   * @param username the username.
    * @param password the password
    * @param sslContext ssl context for http client
    * @throws MalformedURLException for a badly formed URL.
@@ -124,7 +165,7 @@ public class Client {
   /**
    * Construct an instance with the provided url and credentials.
    * @param url the url e.g. "http://localhost:15672/api/".
-   * @param username the user name.
+   * @param username the username.
    * @param password the password
    * @param sslConnectionSocketFactory ssl connection factory for http client
    * @throws MalformedURLException for a badly formed URL.
@@ -152,6 +193,21 @@ public class Client {
    */
   public Client(URL url) throws MalformedURLException, URISyntaxException {
     this(url, null, null);
+  }
+
+  private Client(URL url, String username, String password, SSLConnectionSocketFactory sslConnectionSocketFactory,
+                 SSLContext sslContext,
+                 HttpClientBuilderConfigurator configurator) throws URISyntaxException, MalformedURLException {
+    Assert.notNull(url);
+    Assert.notNull(username);
+    Assert.notNull(password);
+    Assert.notNull(configurator);
+    this.rootUri = url.toURI();
+
+    HttpComponentsClientHttpRequestFactory rf = getRequestFactory(url, username, password,
+        sslConnectionSocketFactory, sslContext, configurator);
+    this.rt = new RestTemplate(rf);
+    this.rt.setMessageConverters(getMessageConverters());
   }
 
   /**
@@ -232,6 +288,21 @@ public class Client {
   public void closeConnection(String name) {
     final URI uri = uriWithPath("./connections/" + encodePathSegment(name));
     deleteIgnoring404(uri);
+  }
+
+  /**
+   * Forcefully closes individual connection with a user-provided message.
+   * The client will receive a <i>connection.close</i> method frame.
+   *
+   * @param name connection name
+   */
+  public void closeConnection(String name, String reason) {
+    final URI uri = uriWithPath("./connections/" + encodePathSegment(name));
+
+    MultiValueMap<String, String> headers = new LinkedMultiValueMap<String, String>();
+    headers.put("X-Reason", Collections.singletonList(reason));
+
+    deleteIgnoring404(uri, headers);
   }
 
   /**
@@ -349,6 +420,11 @@ public class Client {
     return this.getForObjectReturningNullOn404(uri, QueueInfo.class);
   }
 
+  public void declarePolicy(String vhost, String name, PolicyInfo info) {
+    final URI uri = uriWithPath("./policies/" + encodePathSegment(vhost) + "/" + encodePathSegment(name));
+    this.rt.put(uri, info);
+  }
+
   public void declareQueue(String vhost, String name, QueueInfo info) {
     final URI uri = uriWithPath("./queues/" + encodePathSegment(vhost) + "/" + encodePathSegment(name));
     this.rt.put(uri, info);
@@ -362,6 +438,9 @@ public class Client {
     this.deleteIgnoring404(uriWithPath("./queues/" + encodePathSegment(vhost) + "/" + encodePathSegment(name)));
   }
 
+  public void deletePolicy(String vhost, String name) {
+    this.deleteIgnoring404(uriWithPath("./policies/" + encodePathSegment(vhost) + "/" + encodePathSegment(name)));
+  }
 
   public List<UserInfo> getUsers() {
     final URI uri = uriWithPath("./users/");
@@ -377,11 +456,29 @@ public class Client {
     if(username == null) {
       throw new IllegalArgumentException("username cannot be null");
     }
-    if(password == null || password.length == 0) {
-      throw new IllegalArgumentException("password cannot be null or empty");
+    if(password == null) {
+      throw new IllegalArgumentException("password cannot be null or empty. If you need to create a user that "
+            + "will only authenticate using an x509 certificate, use createUserWithPasswordHash with a blank hash.");
     }
     Map<String, Object> body = new HashMap<String, Object>();
     body.put("password", new String(password));
+    body.put("tags", joinStrings(",", tags));
+
+    final URI uri = uriWithPath("./users/" + encodePathSegment(username));
+    this.rt.put(uri, body);
+  }
+
+  public void createUserWithPasswordHash(String username, char[] passwordHash, List<String> tags) {
+    if(username == null) {
+      throw new IllegalArgumentException("username cannot be null");
+    }
+    // passwordless authentication is a thing. See
+    // https://github.com/rabbitmq/hop/issues/94 and https://www.rabbitmq.com/authentication.html. MK.
+    if(passwordHash == null) {
+      passwordHash = "".toCharArray();
+    }
+    Map<String, Object> body = new HashMap<String, Object>();
+    body.put("password_hash", String.valueOf(passwordHash));
     body.put("tags", joinStrings(",", tags));
 
     final URI uri = uriWithPath("./users/" + encodePathSegment(username));
@@ -415,6 +512,17 @@ public class Client {
   public void clearPermissions(String vhost, String username) {
     final URI uri = uriWithPath("./permissions/" + encodePathSegment(vhost) + "/" + encodePathSegment(username));
     deleteIgnoring404(uri);
+  }
+
+  public List<PolicyInfo> getPolicies() {
+    final URI uri = uriWithPath("./policies/");
+    return Arrays.asList(this.rt.getForObject(uri, PolicyInfo[].class));
+  }
+
+  public List<PolicyInfo> getPolicies(String vhost) {
+    final URI uri = uriWithPath("./policies/" + encodePathSegment(vhost));
+    final PolicyInfo[] result = this.getForObjectReturningNullOn404(uri, PolicyInfo[].class);
+    return asListOrNull(result);
   }
 
   public List<BindingInfo> getBindings() {
@@ -595,7 +703,11 @@ public class Client {
     return xs;
   }
 
-  private HttpComponentsClientHttpRequestFactory getRequestFactory(final URL url, final String username, final String password, final SSLConnectionSocketFactory sslConnectionSocketFactory, final SSLContext sslContext) throws MalformedURLException {
+  private HttpComponentsClientHttpRequestFactory getRequestFactory(final URL url,
+                                                                   final String username, final String password,
+                                                                   final SSLConnectionSocketFactory sslConnectionSocketFactory,
+                                                                   final SSLContext sslContext,
+                                                                   final HttpClientBuilderConfigurator configurator) throws MalformedURLException {
     String theUser = username;
     String thePassword = password;
     String userInfo = url.getUserInfo();
@@ -608,6 +720,8 @@ public class Client {
         thePassword = userParts[1];
       }
     }
+
+    // configure HttpClientBuilder essentials
     final HttpClientBuilder bldr = HttpClientBuilder.create().
         setDefaultCredentialsProvider(getCredentialsProvider(url, theUser, thePassword));
     bldr.setDefaultHeaders(Arrays.asList(new BasicHeader(HttpHeaders.CONTENT_TYPE, "application/json")));
@@ -618,7 +732,11 @@ public class Client {
       bldr.setSslcontext(sslContext);
     }
 
-    HttpClient httpClient = bldr.build();
+    HttpClient httpClient;
+    // this lets the user perform non-essential configuration (e.g. timeouts)
+    // but reduces the risk of essentials not being set. MK.
+    HttpClientBuilder b = configurator.configure(bldr);
+    httpClient = b.build();
 
     // RabbitMQ HTTP API currently does not support challenge/response for PUT methods.
     AuthCache authCache = new BasicAuthCache();
@@ -657,6 +775,17 @@ public class Client {
   private void deleteIgnoring404(URI uri) {
     try {
       this.rt.delete(uri);
+    } catch (final HttpClientErrorException ce) {
+      if(!(ce.getStatusCode() == HttpStatus.NOT_FOUND)) {
+        throw ce;
+      }
+    }
+  }
+
+  private void deleteIgnoring404(URI uri, MultiValueMap headers) {
+    try {
+      HttpEntity<Object> entity = new HttpEntity<Object>(null, headers);
+      this.rt.exchange(uri, HttpMethod.DELETE, entity, Object.class);
     } catch (final HttpClientErrorException ce) {
       if(!(ce.getStatusCode() == HttpStatus.NOT_FOUND)) {
         throw ce;
